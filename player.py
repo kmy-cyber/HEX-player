@@ -1,527 +1,682 @@
-from base import Player
-import numpy as np
-from collections import deque
-import heapq
+import time
+import copy
+import random
 
+class Player:
+    def __init__(self, player_id: int):
+        # Inicializa un jugador con su ID
+        self.player_id = player_id
+
+    def play(self, board):
+        # Método que debe ser implementado por las subclases para realizar un movimiento
+        raise NotImplementedError("¡Implementa este método!")
+
+
+class HexBoard:
+    def __init__(self, size: int):
+        # Inicializa un tablero de Hex con el tamaño especificado
+        self.size = size
+        self.board = [[0 for _ in range(size)] for _ in range(size)]
+
+    def clone(self):
+        # Crea una copia del tablero actual
+        pass
+
+    def place_piece(self, row: int, col: int, player_id: int) -> bool:
+        # Coloca una pieza del jugador en la posición especificada
+        pass
+
+    def get_possible_moves(self) -> list:
+        # Obtiene una lista de todos los movimientos posibles
+        pass
+    
+    def check_connection(self, player_id: int) -> bool:
+        # Verifica si el jugador ha creado una conexión ganadora
+        pass
 
 class HexPlayer(Player):
-    def __init__(self, player_id: int):
+    def __init__(self, player_id: int, max_time: int=10):
+        # Inicializa un jugador de Hex con su ID y tiempo máximo de juego
         super().__init__(player_id)
         self.opponent_id = 3 - player_id
         self.max_depth = 5
-        # posibles direcciones de movimiento
-        self.directions = np.array([(-1, 0), (1, 0), (0, -1), (0, 1), (-1, 1), (1, -1)])
-        # Los vecinos en caché para no tener que recalcularlos cada vez :\
-        self.neighbors_cache = {}
-        # Ayudar a recordar los tipos de cadenas que ya hemos clasificado
-        self.chain_type_cache = {}
+        self.max_time = max_time
+        self.directions = [(-1, 0), (1, 0), (0, -1), (0, 1), (-1, 1), (1, -1)]
+        self.start_time = 0
+        self.use_symmetry = True
+        self.first_move = None
+        self.opening_book = {
+            11: [(5, 5), (4, 5), (5, 4), (6, 5), (5, 6)],
+            8: [(3, 3), (4, 3), (3, 4)],
+            7: [(3, 3)],
+            6: [(2, 2)],
+        }
 
-    def play(self, board):
-        possible_moves = board.get_possible_moves()
-        size = board.size
+    def play(self, board: HexBoard):
+        # Determina el mejor movimiento para el jugador en el tablero actual
+        self.start_time = time.time()
         
-        # Primer movimiento, tomar el centro - suele ser un buen punto de partida
-        if len(possible_moves) == size * size:
-            return (size // 2, size // 2)
+        empty_cells = sum(row.count(0) for row in board.board)
+        if empty_cells == board.size * board.size:
+            if board.size in self.opening_book:
+                return random.choice(self.opening_book[board.size])
         
-        # Si ser segundos y el centro está ocupado, jugar cerca de él
-        if len(possible_moves) == size * size - 1:
-            center = (size // 2, size // 2)
-            if board.board[center[0]][center[1]] != 0:
-                neighbors = self.get_neighbors(center[0], center[1], size)
-                for neighbor in neighbors:
-                    if board.board[neighbor[0]][neighbor[1]] == 0:
-                        return neighbor
-
-        np_board = np.array(board.board)
+        if self.use_symmetry:
+            if empty_cells == board.size * board.size - 1:
+                for r in range(board.size):
+                    for c in range(board.size):
+                        if board.board[r][c] != 0:
+                            self.first_move = (r, c)
+                            if r == board.size // 2 and c == board.size // 2:
+                                return (r, c+1)
+                            if board.size % 2 == 1 and board.board[board.size//2][board.size//2] == 0:
+                                return (board.size//2, board.size//2)
+                            else:
+                                return (c, r)
+            
+            if self.first_move is not None:
+                last_move = None
+                for r in range(board.size):
+                    for c in range(board.size):
+                        if board.board[r][c] == self.opponent_id and all(
+                            board.board[nr][nc] != self.opponent_id 
+                            for nr, nc in self._get_neighbors(r, c) 
+                            if 0 <= nr < board.size and 0 <= nc < board.size
+                        ):
+                            last_move = (r, c)
+                            break
+                    if last_move:
+                        break
+                
+                if last_move:
+                    sym_move = (last_move[1], last_move[0])
+                    if 0 <= sym_move[0] < board.size and 0 <= sym_move[1] < board.size and board.board[sym_move[0]][sym_move[1]] == 0:
+                        return sym_move
         
-        # Ajustar profundidad en dependencia del estado progreso del juego
-        if len(possible_moves) > (size * size) * 0.7:
-            self.max_depth = 5
-        else:
-            self.max_depth = 3
-
-        # ver cadenas que tenemos y las que ha contruido el oponente
-        player_chains = self.identify_chains_optimized(np_board, self.player_id, size)
-        opponent_chains = self.identify_chains_optimized(np_board, self.opponent_id, size)
-        
-        # Usar heuristicas para encontrar movimientos factibles
-        candidate_moves = self.generate_candidate_moves(board, player_chains, opponent_chains)
+        candidate_moves = self.generate_candidate_moves(board)
         
         if not candidate_moves:
-            candidate_moves = possible_moves # considerar todos los posibles 
+            candidate_moves = board.get_possible_moves()
         
-        # Checkear si podemos ganar en movimientos inmediatos (Primera prioridad)
-        for move in candidate_moves:
-            board_copy = board.clone()
-            board_copy.place_piece(move[0], move[1], self.player_id)
-            if board_copy.check_connection(self.player_id):
-                return move
+        if len(candidate_moves) == 1:
+            return candidate_moves[0]
         
-        # Bloquear al oponente si está a punto de ganar (Segunda prioridad)
-        for move in possible_moves:
-            board_copy = board.clone()
-            board_copy.place_piece(move[0], move[1], self.opponent_id)
-            if board_copy.check_connection(self.opponent_id):
-                return move
-        
-        # minimax y poda alfa-beta
         best_score = float('-inf')
-        best_move = candidate_moves[0] if candidate_moves else possible_moves[0]
-        
+        best_move = None
         alpha = float('-inf')
         beta = float('inf')
         
         for move in candidate_moves:
-            board_copy = board.clone()
-            board_copy.place_piece(move[0], move[1], self.player_id)
-            np_board_copy = np.array(board_copy.board)
+            new_board = board.clone()
+            new_board.place_piece(move[0], move[1], self.player_id)
             
-            influence_region = self.calculate_influence_region_optimized(np_board_copy, move, self.player_id, size)
-            
-            score = self.minimax(board_copy, np_board_copy, self.max_depth - 1, False, alpha, beta, influence_region)
+            score = self.minimax(new_board, self.max_depth - 1, alpha, beta, False)
             
             if score > best_score:
                 best_score = score
                 best_move = move
             
             alpha = max(alpha, best_score)
+            
+            if time.time() - self.start_time > self.max_time * 0.9:
+                break
         
+        if best_move is None:
+            return random.choice(board.get_possible_moves())
+            
         return best_move
-    
-    def minimax(self, board, np_board, depth, is_maximizing, alpha, beta, influence_region=None):
-        # Terminal conditions
+
+    def minimax(self, board, depth, alpha, beta, is_maximizing):
+        # Implementa el algoritmo minimax con poda alfa-beta para evaluar movimientos
         if board.check_connection(self.player_id):
-            return 100000
+            return 1000
+        
         if board.check_connection(self.opponent_id):
-            return -100000
-        if depth == 0:
-            return self.evaluate_optimized(np_board, board.size)
+            return -1000
         
-        possible_moves = board.get_possible_moves()
-        size = board.size
+        if depth == 0 or time.time() - self.start_time > self.max_time * 0.9:
+            return self.evaluate_board(board)
         
-        if influence_region and not is_maximizing:
-            possible_moves = [move for move in possible_moves if move in influence_region]
-            if not possible_moves:
-                possible_moves = board.get_possible_moves()
+        candidate_moves = self.generate_candidate_moves(board)
         
-        if len(possible_moves) > 10:
-            player_id = self.player_id if is_maximizing else self.opponent_id
-            opponent_id = self.opponent_id if is_maximizing else self.player_id
-            player_chains = self.identify_chains_optimized(np_board, player_id, size)
-            opponent_chains = self.identify_chains_optimized(np_board, opponent_id, size)
-            candidate_moves = self.generate_candidate_moves(board, player_chains, opponent_chains)
-            if candidate_moves:
-                possible_moves = candidate_moves
+        if not candidate_moves:
+            candidate_moves = board.get_possible_moves()
         
         if is_maximizing:
             max_eval = float('-inf')
-            for move in possible_moves:
-                board_copy = board.clone()
-                board_copy.place_piece(move[0], move[1], self.player_id)
-                np_board_copy = np.array(board_copy.board)
+            for move in candidate_moves:
+                new_board = board.clone()
+                new_board.place_piece(move[0], move[1], self.player_id)
                 
-                new_influence_region = self.calculate_influence_region_optimized(np_board_copy, move, self.player_id, size)
+                eval = self.minimax(new_board, depth - 1, alpha, beta, False)
+                max_eval = max(max_eval, eval)
                 
-                value = self.minimax(board_copy, np_board_copy, depth - 1, False, alpha, beta, new_influence_region)
-                max_eval = max(max_eval, value)
-                
-                alpha = max(alpha, value)
+                alpha = max(alpha, eval)
                 if beta <= alpha:
+                    break
+                
+                if time.time() - self.start_time > self.max_time * 0.9:
                     break
                     
             return max_eval
         else:
             min_eval = float('inf')
-            for move in possible_moves:
-                board_copy = board.clone()
-                board_copy.place_piece(move[0], move[1], self.opponent_id)
-                np_board_copy = np.array(board_copy.board)
+            for move in candidate_moves:
+                new_board = board.clone()
+                new_board.place_piece(move[0], move[1], self.opponent_id)
                 
-                new_influence_region = self.calculate_influence_region_optimized(np_board_copy, move, self.opponent_id, size)
+                eval = self.minimax(new_board, depth - 1, alpha, beta, True)
+                min_eval = min(min_eval, eval)
                 
-                value = self.minimax(board_copy, np_board_copy, depth - 1, True, alpha, beta, new_influence_region)
-                min_eval = min(min_eval, value)
-                
-                beta = min(beta, value)
+                beta = min(beta, eval)
                 if beta <= alpha:
+                    break
+                
+                if time.time() - self.start_time > self.max_time * 0.9:
                     break
                     
             return min_eval
-    
-    def evaluate_optimized(self, np_board, size):
-        # Condiciones de victoria
-        player_chains = self.identify_chains_optimized(np_board, self.player_id, size)
-        opponent_chains = self.identify_chains_optimized(np_board, self.opponent_id, size)
-        
-        for chain, chain_type in player_chains:
-            if (self.player_id == 1 and chain_type == "LeftRight") or (self.player_id == 2 and chain_type == "TopBottom"):
-                return 100000
-        
-        for chain, chain_type in opponent_chains:
-            if (self.opponent_id == 1 and chain_type == "LeftRight") or (self.opponent_id == 2 and chain_type == "TopBottom"):
-                return -100000
-        
-        player_score = self.evaluate_chains(player_chains, size, self.player_id)
-        opponent_score = self.evaluate_chains(opponent_chains, size, self.opponent_id)
-        
-        player_path_score = self.shortest_path_score_optimized(np_board, self.player_id, size)
-        opponent_path_score = self.shortest_path_score_optimized(np_board, self.opponent_id, size)
-        
-        return (player_score + player_path_score) - (opponent_score + opponent_path_score)
-    
-    def identify_chains_optimized(self, np_board, player_id, size):
 
-        player_positions = np.argwhere(np_board == player_id)
-        visited = set()
-        chains = []
+    def evaluate_board(self, board):
+        # Evalúa la posición actual del tablero para determinar qué tan favorable es
+        player_groups = self.identify_groups(board, self.player_id)
+        opponent_groups = self.identify_groups(board, self.opponent_id)
         
-        for pos in player_positions:
-            i, j = pos
-            if (i, j) not in visited:
-                chain = set()
-                self.dfs_chain_optimized(np_board, i, j, player_id, visited, chain, size)
-                chains.append(chain)
+        player_influence = self.calculate_influence_region(board, player_groups, self.player_id)
+        opponent_influence = self.calculate_influence_region(board, opponent_groups, self.opponent_id)
         
-        classified_chains = []
-        for chain in chains:
-            chain_key = frozenset(chain)
-            if chain_key in self.chain_type_cache:
-                chain_type = self.chain_type_cache[chain_key]
-            else:
-                chain_type = self.classify_chain(chain, size, player_id)
-                self.chain_type_cache[chain_key] = chain_type
-            classified_chains.append((chain, chain_type))
+        player_connectivity = self.calculate_connectivity(board, player_groups, self.player_id)
+        opponent_connectivity = self.calculate_connectivity(board, opponent_groups, self.opponent_id)
         
-        return classified_chains
-    
-    def dfs_chain_optimized(self, np_board, i, j, player_id, visited, chain, size):
-        if (i, j) in visited or np_board[i, j] != player_id:
-            return
+        player_potential = self.calculate_winning_potential(board, player_groups, self.player_id)
+        opponent_potential = self.calculate_winning_potential(board, opponent_groups, self.opponent_id)
         
-        visited.add((i, j))
-        chain.add((i, j))
-        
-        neighbors = self.get_neighbors(i, j, size)
-        for ni, nj in neighbors:
-            self.dfs_chain_optimized(np_board, ni, nj, player_id, visited, chain, size)
-    
-    def get_neighbors(self, i, j, size):
-
-        key = (i, j, size)
-        if key in self.neighbors_cache:
-            return self.neighbors_cache[key]
-        
-        neighbors = []
-        
-        if j > 0:
-            neighbors.append((i, j - 1))
-        if j < size - 1:
-            neighbors.append((i, j + 1))
-        if i > 0:
-            neighbors.append((i - 1, j))
-        if i < size - 1:
-            neighbors.append((i + 1, j))
-        
-        if i % 2 == 0:
-            if i > 0 and j < size - 1:
-                neighbors.append((i - 1, j + 1))
-            if i < size - 1 and j < size - 1:
-                neighbors.append((i + 1, j + 1))
-        else:
-            if i > 0 and j > 0:
-                neighbors.append((i - 1, j - 1))
-            if i < size - 1 and j > 0:
-                neighbors.append((i + 1, j - 1))
-        
-        valid_neighbors = [(x, y) for (x, y) in neighbors if 0 <= x < size and 0 <= y < size]
-        self.neighbors_cache[key] = valid_neighbors
-        return valid_neighbors
-    
-    def calculate_influence_region_optimized(self, np_board, move, player_id, size):
-        """Calculate the influence region for a move using BFS"""
-        influence_region = set()
-        visited = set()
-        
-        queue = deque([move])
-        visited.add(move)
-        
-        while queue:
-            current = queue.popleft()
-            influence_region.add(current)
-            
-            neighbors = self.get_neighbors(current[0], current[1], size)
-            for neighbor in neighbors:
-                nx, ny = neighbor
-                if (nx, ny) not in visited and np_board[nx, ny] == 0:
-                    visited.add((nx, ny))
-                    queue.append((nx, ny))
-                    
-                    second_neighbors = self.get_neighbors(nx, ny, size)
-                    for sx, sy in second_neighbors:
-                        if np_board[sx, sy] == player_id:
-                            influence_region.add((nx, ny))
-                            break
-        
-        return influence_region
-    
-    def shortest_path_score_optimized(self, np_board, player_id, size):
-        """Optimized version of shortest path score using numpy"""
-        if player_id == 1:
-            starts = [(0, j) for j in range(size)]
-            ends = [(size-1, j) for j in range(size)]
-        else:
-            starts = [(i, 0) for i in range(size)]
-            ends = [(i, size-1) for i in range(size)]
-        
-        # Matriz de distancias
-        distances = np.full((size, size), np.inf)
-        
-        # Ddistancias basadas en el estado del tablero
-        player_positions = np.argwhere(np_board == player_id)
-        empty_positions = np.argwhere(np_board == 0)
-        opponent_positions = np.argwhere(np_board == 3 - player_id)
-        
-        for i, j in player_positions:
-            distances[i, j] = 0
-        for i, j in empty_positions:
-            distances[i, j] = 1
-        
-        min_distance = np.inf
-        
-        for start in starts:
-            if np_board[start[0], start[1]] == 3 - player_id:
-                continue
-                
-            pq = [(distances[start[0], start[1]], start)]
-            visited = set()
-            
-            while pq:
-                dist, current = heapq.heappop(pq)
-                
-                if current in visited:
-                    continue
-                    
-                visited.add(current)
-                
-                if current in ends:
-                    min_distance = min(min_distance, dist)
-                    break
-
-                neighbors = self.get_neighbors(current[0], current[1], size)
-                
-                for neighbor in neighbors:
-                    if neighbor not in visited:
-                        new_dist = dist + distances[neighbor[0], neighbor[1]]
-                        if new_dist < distances[neighbor[0], neighbor[1]] and dist <= min_distance:
-                            distances[neighbor[0], neighbor[1]] = new_dist
-                            heapq.heappush(pq, (new_dist, neighbor))
-        
-        if min_distance == np.inf:
-            return 0
-        return 10000 - min_distance
-    
-    # pequeñas optimizaciones
-    
-    def classify_chain(self, chain, size, player_id):
-        # Veamos si la cadena se conecta a los bordes
-        top = any(pos[1] == 0 for pos in chain)
-        bottom = any(pos[1] == size - 1 for pos in chain)
-        left = any(pos[0] == 0 for pos in chain)
-        right = any(pos[0] == size - 1 for pos in chain)
-        
-        if player_id == 1:  # El jugador 1 conecta izquierda-derecha
-            if left and right:
-                return "LeftRight"  # Winning chain
-            elif left:
-                return "Left"
-            elif right:
-                return "Right"
-            else:
-                return "Middle"
-        else:  # El jugador 2 conecta arriba-abajo
-            if top and bottom:
-                return "TopBottom"
-            elif top:
-                return "Top"
-            elif bottom:
-                return "Bottom"
-            else:
-                return "Middle"
-    
-    def evaluate_chains(self, chains, size, player_id):
-        score = 0
-        
-        # Check for winning chains
-        for chain, chain_type in chains:
-            if (player_id == 1 and chain_type == "LeftRight") or (player_id == 2 and chain_type == "TopBottom"):
-                return 10000
-            
-            chain_size = len(chain)
-            if chain_type in ["Top", "Bottom", "Left", "Right"]:
-                score += chain_size * 10 
-            else:
-                score += chain_size * 5 
-            
-            virtual_connections = self.find_virtual_connections(chain, size, player_id)
-            score += len(virtual_connections) * 15
-            
-            if self.is_one_to_connect(chain, chain_type, size, player_id):
-                score += 500
+        score = (
+            len(player_influence) - len(opponent_influence) +
+            player_connectivity - opponent_connectivity +
+            player_potential - opponent_potential
+        )
         
         return score
-    
-    def find_virtual_connections(self, chain, size, player_id):
-        virtual_connections = []
-        chain_list = list(chain)
+
+    def identify_groups(self, board, player_id):
+        # Identifica grupos conectados de piezas del mismo jugador
+        groups = []
+        visited = set()
         
-        # Busquemos patrones de puente
-        for i in range(len(chain_list)):
-            x1, y1 = chain_list[i]
-            neighbors = self.get_neighbors(x1, y1, size)
+        for r in range(board.size):
+            for c in range(board.size):
+                if board.board[r][c] == player_id and (r, c) not in visited:
+                    group = []
+                    self.dfs_group(board, r, c, player_id, visited, group)
+                    groups.append(group)
+        
+        return groups
+
+    def dfs_group(self, board, r, c, player_id, visited, group):
+        # Realiza una búsqueda en profundidad para encontrar piezas conectadas
+        if (r, c) in visited or r < 0 or r >= board.size or c < 0 or c >= board.size or board.board[r][c] != player_id:
+            return
+        
+        visited.add((r, c))
+        group.append((r, c))
+        
+        for dr, dc in self.directions:
+            nr, nc = r + dr, c + dc
+            self.dfs_group(board, nr, nc, player_id, visited, group)
+
+    def calculate_influence_region(self, board, groups, player_id):
+        # Calcula la región de influencia de un jugador en el tablero
+        influence = set()
+        
+        for group in groups:
+            for pos in group:
+                influence.add(pos)
+        
+        for group in groups:
+            for r, c in group:
+                for dr, dc in self.directions:
+                    nr, nc = r + dr, c + dc
+                    if 0 <= nr < board.size and 0 <= nc < board.size and board.board[nr][nc] == 0:
+                        influence.add((nr, nc))
+        
+        return influence
+
+    def calculate_connectivity(self, board, groups, player_id):
+        # Calcula la conectividad de los grupos de un jugador con los bordes del tablero
+        connectivity = 0
+        
+        if player_id == 2:
+            for group in groups:
+                top_connected = any(pos[0] == 0 for pos in group)
+                bottom_connected = any(pos[0] == board.size - 1 for pos in group)
+                
+                if top_connected and bottom_connected:
+                    connectivity += 500
+                elif top_connected:
+                    connectivity += 10
+                elif bottom_connected:
+                    connectivity += 10
+                
+                connectivity += len(group)
+        
+        else:
+            for group in groups:
+                left_connected = any(pos[1] == 0 for pos in group)
+                right_connected = any(pos[1] == board.size - 1 for pos in group)
+                
+                if left_connected and right_connected:
+                    connectivity += 500
+                elif left_connected:
+                    connectivity += 10
+                elif right_connected:
+                    connectivity += 10
+                
+                connectivity += len(group)
+        
+        return connectivity
+
+    def calculate_winning_potential(self, board, groups, player_id):
+        # Evalúa el potencial de victoria basado en la longitud de los caminos más cortos
+        potential = 0
+        
+        if player_id == 2:
+            for c in range(board.size):
+                path_length = self.shortest_path_length(board, 0, c, board.size - 1, None, player_id)
+                if path_length > 0:
+                    potential += (board.size * 2 - path_length)
+        
+        else:
+            for r in range(board.size):
+                path_length = self.shortest_path_length(board, r, 0, None, board.size - 1, player_id)
+                if path_length > 0:
+                    potential += (board.size * 2 - path_length)
+        
+        return potential
+
+    def shortest_path_length(self, board, start_r, start_c, target_r, target_c, player_id):
+        # Encuentra la longitud del camino más corto entre dos puntos
+        import heapq
+        
+        queue = [(0, start_r, start_c)]
+        visited = set()
+        
+        while queue:
+            dist, r, c = heapq.heappop(queue)
             
-            for nx, ny in neighbors:
-                if (nx, ny) not in chain and self.count_common_neighbors(chain, (nx, ny), size) >= 2:
-                    virtual_connections.append((nx, ny))
+            if (r, c) in visited:
+                continue
+            
+            visited.add((r, c))
+            
+            if (target_r is not None and r == target_r and 
+                target_c is not None and c == target_c):
+                return dist
+            elif target_r is not None and r == target_r and target_c is None:
+                return dist
+            elif target_r is None and target_c is not None and c == target_c:
+                return dist
+            
+            for dr, dc in self.directions:
+                nr, nc = r + dr, c + dc
+                
+                if 0 <= nr < board.size and 0 <= nc < board.size and (nr, nc) not in visited:
+                    if board.board[nr][nc] == player_id:
+                        cost = 0
+                    elif board.board[nr][nc] == 0:
+                        cost = 1
+                    else:
+                        continue
+                    
+                    heapq.heappush(queue, (dist + cost, nr, nc))
+        
+        return -1
+
+    def find_carriers(self, board, group, player_id):
+        # Encuentra casillas vacías adyacentes a un grupo que pueden extender la conexión
+        carriers = set()
+        
+        for r, c in group:
+            for dr, dc in self.directions:
+                nr, nc = r + dr, c + dc
+                if 0 <= nr < board.size and 0 <= nc < board.size and board.board[nr][nc] == 0:
+                    carriers.add((nr, nc))
+        
+        return carriers
+
+    def generate_candidate_moves(self, board):
+        # Genera una lista de movimientos candidatos basados en la estrategia
+        candidates = set()
+        
+        player_groups = self.identify_groups(board, self.player_id)
+        opponent_groups = self.identify_groups(board, self.opponent_id)
+        
+        player_topbottom = self.find_topbottom_groups(board, player_groups, self.player_id)
+        opponent_leftright = self.find_leftright_groups(board, opponent_groups, self.opponent_id)
+        
+        for group in player_topbottom:
+            carriers = self.find_carriers(board, group, self.player_id)
+            candidates.update(carriers)
+        
+        for group in opponent_leftright:
+            carriers = self.find_carriers(board, group, self.opponent_id)
+            candidates.update(carriers)
+        
+        if self.player_id == 1:
+            opponent_top_groups = self.find_top_groups(board, opponent_groups, self.opponent_id)
+            opponent_bottom_groups = self.find_bottom_groups(board, opponent_groups, self.opponent_id)
+            
+            for group in opponent_top_groups:
+                blocking_moves = self.find_one_to_connect(board, group, self.opponent_id, "bottom")
+                candidates.update(blocking_moves)
+            
+            for group in opponent_bottom_groups:
+                blocking_moves = self.find_one_to_connect(board, group, self.opponent_id, "top")
+                candidates.update(blocking_moves)
+        else:
+            opponent_left_groups = self.find_left_groups(board, opponent_groups, self.opponent_id)
+            opponent_right_groups = self.find_right_groups(board, opponent_groups, self.opponent_id)
+            
+            for group in opponent_left_groups:
+                blocking_moves = self.find_one_to_connect(board, group, self.opponent_id, "right")
+                candidates.update(blocking_moves)
+            
+            for group in opponent_right_groups:
+                blocking_moves = self.find_one_to_connect(board, group, self.opponent_id, "left")
+                candidates.update(blocking_moves)
+        
+        for group1 in opponent_groups:
+            for group2 in opponent_groups:
+                if group1 != group2:
+                    blocking_moves = self.find_connecting_moves(board, group1, group2, self.opponent_id)
+                    candidates.update(blocking_moves)
+        
+        virtual_connections = self.find_virtual_connections(board, opponent_groups, self.opponent_id)
+        candidates.update(virtual_connections)
+        
+        top_groups = self.find_top_groups(board, player_groups, self.player_id)
+        bottom_groups = self.find_bottom_groups(board, player_groups, self.player_id)
+        
+        for group in top_groups:
+            one_to_connect = self.find_one_to_connect(board, group, self.player_id, "bottom")
+            candidates.update(one_to_connect)
+        
+        for group in bottom_groups:
+            one_to_connect = self.find_one_to_connect(board, group, self.player_id, "top")
+            candidates.update(one_to_connect)
+        
+        for top_group in top_groups:
+            for bottom_group in bottom_groups:
+                connecting_moves = self.find_connecting_moves(board, top_group, bottom_group, self.player_id)
+                candidates.update(connecting_moves)
+        
+        if candidates:
+            return list(candidates)
+        
+        near_existing = set()
+        for r in range(board.size):
+            for c in range(board.size):
+                if board.board[r][c] == self.player_id:
+                    for dr, dc in self.directions:
+                        nr, nc = r + dr, c + dc
+                        if 0 <= nr < board.size and 0 <= nc < board.size and board.board[nr][nc] == 0:
+                            near_existing.add((nr, nc))
+        
+        if near_existing:
+            return list(near_existing)
+        
+        return board.get_possible_moves()
+
+    def find_topbottom_groups(self, board, groups, player_id):
+        # Encuentra grupos que conectan los bordes superior e inferior
+        topbottom_groups = []
+        
+        for group in groups:
+            top_connected = any(pos[0] == 0 for pos in group)
+            bottom_connected = any(pos[0] == board.size - 1 for pos in group)
+            
+            if top_connected and bottom_connected:
+                topbottom_groups.append(group)
+        
+        return topbottom_groups
+
+    def find_leftright_groups(self, board, groups, player_id):
+        # Encuentra grupos que conectan los bordes izquierdo y derecho
+        leftright_groups = []
+        
+        for group in groups:
+            left_connected = any(pos[1] == 0 for pos in group)
+            right_connected = any(pos[1] == board.size - 1 for pos in group)
+            
+            if left_connected and right_connected:
+                leftright_groups.append(group)
+        
+        return leftright_groups
+
+    def find_left_groups(self, board, groups, player_id):
+        # Encuentra grupos conectados al borde izquierdo
+        left_groups = []
+        
+        for group in groups:
+            if any(pos[1] == 0 for pos in group):
+                left_groups.append(group)
+        
+        return left_groups
+
+    def find_right_groups(self, board, groups, player_id):
+        # Encuentra grupos conectados al borde derecho
+        right_groups = []
+        
+        for group in groups:
+            if any(pos[1] == board.size - 1 for pos in group):
+                right_groups.append(group)
+        
+        return right_groups
+
+    def find_top_groups(self, board, groups, player_id):
+        # Encuentra grupos conectados al borde superior
+        top_groups = []
+        
+        for group in groups:
+            if any(pos[0] == 0 for pos in group):
+                top_groups.append(group)
+        
+        return top_groups
+
+    def find_bottom_groups(self, board, groups, player_id):
+        # Encuentra grupos conectados al borde inferior
+        bottom_groups = []
+        
+        for group in groups:
+            if any(pos[0] == board.size - 1 for pos in group):
+                bottom_groups.append(group)
+        
+        return bottom_groups
+
+    def is_connected_to_left(self, board, r, c, player_id):
+        # Verifica si una posición está conectada al borde izquierdo
+        visited = set()
+        return self._is_connected_to_edge(board, r, c, player_id, visited, lambda pos: pos[1] == 0)
+
+    def is_connected_to_right(self, board, r, c, player_id):
+        # Verifica si una posición está conectada al borde derecho
+        visited = set()
+        return self._is_connected_to_edge(board, r, c, player_id, visited, lambda pos: pos[1] == board.size - 1)
+
+    def find_virtual_connections(self, board, groups, player_id):
+        # Encuentra conexiones virtuales entre grupos
+        virtual_connections = set()
+        
+        for group in groups:
+            for r, c in group:
+                for dr1, dc1 in self.directions:
+                    nr1, nc1 = r + dr1, c + dc1
+                    if 0 <= nr1 < board.size and 0 <= nc1 < board.size and board.board[nr1][nc1] == 0:
+                        for dr2, dc2 in self.directions:
+                            nr2, nc2 = nr1 + dr2, nc1 + dc2
+                            if 0 <= nr2 < board.size and 0 <= nc2 < board.size and board.board[nr2][nc2] == 0:
+                                test_board = board.clone()
+                                test_board.place_piece(nr1, nc1, player_id)
+                                test_board.place_piece(nr2, nc2, player_id)
+                                
+                                new_groups = self.identify_groups(test_board, player_id)
+                                if len(new_groups) < len(groups):
+                                    virtual_connections.add((nr1, nc1))
+                                    virtual_connections.add((nr2, nc2))
+        
+        for group in groups:
+            for r, c in group:
+                for i in range(4):
+                    if i == 0:
+                        nr1, nc1 = r - 1, c - 1
+                        nr2, nc2 = r + 1, c + 1
+                    elif i == 1:
+                        nr1, nc1 = r - 1, c + 1
+                        nr2, nc2 = r + 1, c - 1
+                    elif i == 2:
+                        nr1, nc1 = r, c - 1
+                        nr2, nc2 = r, c + 1
+                    else:
+                        nr1, nc1 = r - 1, c
+                        nr2, nc2 = r + 1, c
+                    
+                    if (0 <= nr1 < board.size and 0 <= nc1 < board.size and 
+                        0 <= nr2 < board.size and 0 <= nc2 < board.size and
+                        board.board[nr1][nc1] == 0 and board.board[nr2][nc2] == 0):
+                        
+                        for pos in [(nr1, nc1), (nr2, nc2)]:
+                            test_board = board.clone()
+                            test_board.place_piece(pos[0], pos[1], player_id)
+                            
+                            if self.creates_strong_connection(test_board, pos, player_id, groups):
+                                virtual_connections.add(pos)
         
         return virtual_connections
-    
-    def count_common_neighbors(self, chain, pos, size):
-        x, y = pos
-        neighbors = self.get_neighbors(x, y, size)
-        return sum(1 for n in neighbors if n in chain)
-    
-    def is_one_to_connect(self, chain, chain_type, size, player_id):
-        if player_id == 1:
-            if chain_type == "Left":
-                
-                for x, y in chain:
-                    if x > size - 3: 
-                        return True
-            elif chain_type == "Right":
-                
-                for x, y in chain:
-                    if x < 2:  
-                        return True
-        else:
-            if chain_type == "Top":
-                
-                for x, y in chain:
-                    if y > size - 3:  
-                        return True
-            elif chain_type == "Bottom":
-                
-                for x, y in chain:
-                    if y < 2: 
-                        return True
+
+    def creates_strong_connection(self, board, pos, player_id, original_groups):
+        # Determina si un movimiento crea una conexión fuerte entre grupos
+        new_groups = self.identify_groups(board, player_id)
+        
+        if len(new_groups) < len(original_groups):
+            return True
+        
+        connected_to_groups = 0
+        r, c = pos
+        for dr, dc in self.directions:
+            nr, nc = r + dr, c + dc
+            if 0 <= nr < board.size and 0 <= nc < board.size and board.board[nr][nc] == player_id:
+                for i, group in enumerate(original_groups):
+                    if any(pos == (nr, nc) for pos in group):
+                        connected_to_groups += 1
+                        break
+        
+        return connected_to_groups >= 2
+
+    def is_connected_to_top(self, board, r, c, player_id):
+        # Verifica si una posición está conectada al borde superior
+        visited = set()
+        return self._is_connected_to_edge(board, r, c, player_id, visited, lambda pos: pos[0] == 0)
+
+    def is_connected_to_bottom(self, board, r, c, player_id):
+        # Verifica si una posición está conectada al borde inferior
+        visited = set()
+        return self._is_connected_to_edge(board, r, c, player_id, visited, lambda pos: pos[0] == board.size - 1)
+
+    def _is_connected_to_edge(self, board, r, c, player_id, visited, edge_condition):
+        # Función auxiliar para verificar conexiones con los bordes
+        if (r, c) in visited:
+            return False
+        
+        if board.board[r][c] != player_id:
+            return False
+        
+        if edge_condition((r, c)):
+            return True
+        
+        visited.add((r, c))
+        
+        for dr, dc in self.directions:
+            nr, nc = r + dr, c + dc
+            if 0 <= nr < board.size and 0 <= nc < board.size:
+                if self._is_connected_to_edge(board, nr, nc, player_id, visited, edge_condition):
+                    return True
+        
         return False
-    
-    def generate_candidate_moves(self, board, player_chains, opponent_chains):
-        size = board.size
-        candidate_moves = set()
-        
-        # Regla 1: Conectar cadenas que están cerca de ganar
-        for chain, chain_type in player_chains:
-            if self.is_one_to_connect(chain, chain_type, size, self.player_id):
-                # Busquemos movimientos que conectarían esta cadena al borde opuesto
-                connecting_moves = self.find_connecting_moves(board, chain, chain_type, self.player_id)
-                candidate_moves.update(connecting_moves)
-        
-        # Regla 2: Bloquear las cadenas del oponente que están cerca de ganar
-        for chain, chain_type in opponent_chains:
-            if self.is_one_to_connect(chain, chain_type, size, self.opponent_id):
-                blocking_moves = self.find_connecting_moves(board, chain, chain_type, self.opponent_id)
-                candidate_moves.update(blocking_moves)
-        
-        # Regla 3: Extender cadenas hacia los bordes
-        for chain, chain_type in player_chains:
-            if chain_type in ["Top", "Bottom", "Left", "Right", "Middle"]:
-                extension_moves = self.find_extension_moves(board, chain, chain_type, self.player_id)
-                candidate_moves.update(extension_moves)
-        
-        # Regla 4: Crear conexiones virtuales
-        for chain, _ in player_chains:
-            virtual_connection_moves = self.find_virtual_connection_moves(board, chain, size)
-            candidate_moves.update(virtual_connection_moves)
-        
-        # Filtremos para asegurarnos de que todos los movimientos son válidos (celdas vacías)
-        valid_candidates = []
-        for move in candidate_moves:
-            if 0 <= move[0] < size and 0 <= move[1] < size and board.board[move[0]][move[1]] == 0:
-                valid_candidates.append(move)
-        
-        return valid_candidates
-    
-    def find_connecting_moves(self, board, chain, chain_type, player_id):
-        size = board.size
+
+    def find_connecting_moves(self, board, group1, group2, player_id):
+        # Encuentra movimientos que pueden conectar dos grupos
         connecting_moves = set()
         
-        if player_id == 1: 
-            if chain_type == "Left":
-                for x, y in chain:
-                    neighbors = self.get_neighbors(x, y, size)
-                    for nx, ny in neighbors:
-                        if board.board[nx][ny] == 0 and nx > x:
-                            connecting_moves.add((nx, ny))
-            elif chain_type == "Right":
-                for x, y in chain:
-                    neighbors = self.get_neighbors(x, y, size)
-                    for nx, ny in neighbors:
-                        if board.board[nx][ny] == 0 and nx < x:
-                            connecting_moves.add((nx, ny))
-        else: 
-            if chain_type == "Top":
-                
-                for x, y in chain:
-                    neighbors = self.get_neighbors(x, y, size)
-                    for nx, ny in neighbors:
-                        if board.board[nx][ny] == 0 and ny > y:
-                            connecting_moves.add((nx, ny))
-            elif chain_type == "Bottom":
-                
-                for x, y in chain:
-                    neighbors = self.get_neighbors(x, y, size)
-                    for nx, ny in neighbors:
-                        if board.board[nx][ny] == 0 and ny < y:
-                            connecting_moves.add((nx, ny))
+        adjacent1 = set()
+        for r, c in group1:
+            for dr, dc in self.directions:
+                nr, nc = r + dr, c + dc
+                if 0 <= nr < board.size and 0 <= nc < board.size and board.board[nr][nc] == 0:
+                    adjacent1.add((nr, nc))
+        
+        adjacent2 = set()
+        for r, c in group2:
+            for dr, dc in self.directions:
+                nr, nc = r + dr, c + dc
+                if 0 <= nr < board.size and 0 <= nc < board.size and board.board[nr][nc] == 0:
+                    adjacent2.add((nr, nc))
+        
+        common_adjacent = adjacent1.intersection(adjacent2)
+        connecting_moves.update(common_adjacent)
+        
+        for pos1 in adjacent1:
+            for pos2 in adjacent2:
+                if self.are_adjacent(pos1, pos2):
+                    connecting_moves.add(pos1)
+                    connecting_moves.add(pos2)
         
         return connecting_moves
-    
-    def find_extension_moves(self, board, chain, chain_type, player_id):
-        size = board.size
-        extension_moves = set()
+
+    def are_adjacent(self, pos1, pos2):
+        # Verifica si dos posiciones son adyacentes
+        r1, c1 = pos1
+        r2, c2 = pos2
         
-        for x, y in chain:
-            neighbors = self.get_neighbors(x, y, size)
-            for nx, ny in neighbors:
-                if board.board[nx][ny] == 0:
-                    if player_id == 1:
-                        if (chain_type == "Left" and nx > x) or (chain_type == "Right" and nx < x) or chain_type == "Middle":
-                            extension_moves.add((nx, ny))
-                    else: 
-                        if (chain_type == "Top" and ny > y) or (chain_type == "Bottom" and ny < y) or chain_type == "Middle":
-                            extension_moves.add((nx, ny))
+        for dr, dc in self.directions:
+            if r1 + dr == r2 and c1 + dc == c2:
+                return True
         
-        return extension_moves
-    
-    def find_virtual_connection_moves(self, board, chain, size):
-        virtual_connection_moves = set()
-        chain_list = list(chain)
+        return False
+
+    def _get_neighbors(self, r, c):
+        # Obtiene las posiciones vecinas de una celda
+        neighbors = []
+        for dr, dc in self.directions:
+            neighbors.append((r + dr, c + dc))
+        return neighbors
+
+    def find_one_to_connect(self, board, group, player_id, target):
+        # Encuentra movimientos que conectan un grupo a un borde específico
+        one_to_connect = set()
         
-        for i in range(len(chain_list)):
-            for j in range(i+1, len(chain_list)):
-                x1, y1 = chain_list[i]
-                x2, y2 = chain_list[j]
-                
-                if abs(x1 - x2) <= 2 and abs(y1 - y2) <= 2:
-                    # Find common empty neighbors
-                    neighbors1 = set(self.get_neighbors(x1, y1, size))
-                    neighbors2 = set(self.get_neighbors(x2, y2, size))
-                    common_neighbors = neighbors1.intersection(neighbors2)
-                    
-                    for nx, ny in common_neighbors:
-                        if board.board[nx][ny] == 0:
-                            virtual_connection_moves.add((nx, ny))
+        temp_board = board.clone()
         
-        return virtual_connection_moves
+        for r, c in group:
+            temp_board.board[r][c] = player_id
+        
+        adjacent_empty = set()
+        for r, c in group:
+            for dr, dc in self.directions:
+                nr, nc = r + dr, c + dc
+                if 0 <= nr < board.size and 0 <= nc < board.size and board.board[nr][nc] == 0:
+                    adjacent_empty.add((nr, nc))
+        
+        for r, c in adjacent_empty:
+            test_board = temp_board.clone()
+            test_board.place_piece(r, c, player_id)
+            
+            if target == "top" and self.is_connected_to_top(test_board, r, c, player_id):
+                one_to_connect.add((r, c))
+            elif target == "bottom" and self.is_connected_to_bottom(test_board, r, c, player_id):
+                one_to_connect.add((r, c))
+            elif target == "left" and self.is_connected_to_left(test_board, r, c, player_id):
+                one_to_connect.add((r, c))
+            elif target == "right" and self.is_connected_to_right(test_board, r, c, player_id):
+                one_to_connect.add((r, c))
+        
+        return one_to_connect
